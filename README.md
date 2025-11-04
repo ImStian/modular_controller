@@ -18,10 +18,13 @@ Waypoints → Path Generator → LOS Guidance → MRAC Controller → Heading Co
 
 ## Video Showcase
 The following videos demonstrates the project. The tracking is not fenomenal.
-- Potato Shaped Path : https://youtu.be/pNIBTUkByVg?si=Ot8wUOWTktnUME-A
-- Sinusoidal Path : https://www.youtube.com/watch?v=AeA2Gf_tDqs
+- [Potato Shaped Path](https://youtu.be/pNIBTUkByVg?si=Ot8wUOWTktnUME-A)  
+- [Sinusoidal Path](https://www.youtube.com/watch?v=AeA2Gf_tDqs)
+
 
 ## Installation
+The control system is made for use with [Marine Robotics Framework by Markus Buchholz](https://github.com/markusbuchholz/marine-robotics-sim-framework)
+
 
 ### Build with colcon
 
