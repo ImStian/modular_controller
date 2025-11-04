@@ -16,6 +16,11 @@ Waypoints → Path Generator → LOS Guidance → MRAC Controller → Heading Co
 - **Heading Controller**: PD controller with feedforward, three modes (PATH, LOS, FORCE)
 - **Thrust Allocation**: Differential thrust for underactuated ASV
 
+## Video Showcase
+The following videos demonstrates the project. The tracking is not fenomenal.
+- Potato Shaped Path : https://youtu.be/pNIBTUkByVg?si=Ot8wUOWTktnUME-A
+- Sinusoidal Path : https://www.youtube.com/watch?v=AeA2Gf_tDqs
+
 ## Installation
 
 ### Build with colcon
