@@ -22,8 +22,8 @@ class MainController(Node):
         self.declare_parameter('los_delta', 1.0) 
         self.declare_parameter('los_k', 0.3)   
         self.declare_parameter('heading_mode', 'los')  # 'los', 'path', or 'force'
-        self.declare_parameter('k_psi', 25.0)  # Increased from 10.0 to prevent slingshot behavior
-        self.declare_parameter('k_r', 2.0)    # Increased from 5.0 for better damping
+        self.declare_parameter('k_psi', 40.0)  # Increased from 10.0 to prevent slingshot behavior
+        self.declare_parameter('k_r', 15.0)    # Increased from 5.0 for better damping
 
         # Publishers for left and right thrusters (match simulator topic names)
         self.left_pub = self.create_publisher(Float64, '/model/blueboat/joint/motor_port_joint/cmd_thrust', 10)
@@ -158,12 +158,18 @@ class MainController(Node):
             self.get_logger().info("Waiting for odometry data...", throttle_duration_sec=1.0)
             return
         
-        # Towfish position (the one that needs to follow the path)
+        # Compute control point position: cp_pos = (1-epsilon)*asv_pos + epsilon*towfish_pos
+        epsilon = self.mrac.epsilon
+        asv_pos = [self.asv_x, self.asv_y]
         towfish_pos = [self.towfish_x, self.towfish_y]
+        cp_pos = [
+            (1 - epsilon) * asv_pos[0] + epsilon * towfish_pos[0],
+            (1 - epsilon) * asv_pos[1] + epsilon * towfish_pos[1]
+        ]
         
-        # 1. LOS guidance - compute desired velocity and path rate
+        # 1. LOS guidance - compute desired velocity and path rate using control point
         v_ref, s_dot = self.los.compute(
-            position=towfish_pos,
+            position=cp_pos,
             s=self.s,
             path_function=self.path  # Use the waypoint path
         )

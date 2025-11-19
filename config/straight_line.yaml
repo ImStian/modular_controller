@@ -1,0 +1,21 @@
+# Straight line path configuration
+# Simple straight path with waypoints along a line
+
+waypoints:
+  # Straight line along x-axis
+  - [0.0, 0.0]
+  - [10.0, 0.0]
+  - [20.0, 0.0]
+  - [30.0, 0.0]
+  - [40.0, 0.0]
+  - [50.0, 0.0]
+
+path_settings:
+  # Interpolation method: 'linear', 'cubic', or 'bspline'
+  interpolation: 'cubic'
+  
+  # Number of interpolation points between waypoints (for smooth curves)
+  resolution: 50
+  
+  # Whether to close the path (make it a loop)
+  closed_path: false
