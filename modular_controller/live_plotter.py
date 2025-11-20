@@ -31,6 +31,8 @@ class LivePlotter(Node):
         self.declare_parameter('show_velocity_plot', True)  # New
         self.declare_parameter('tether_length', 3.5)  # MRAC parameter
         self.declare_parameter('epsilon', 0.7)  # MRAC parameter
+        self.declare_parameter('save_plot_on_completion', True)  # Save plot when done
+        self.declare_parameter('plot_save_path', 'tracking_plot.png')  # Save location
         
         asv_topic = self.get_parameter('asv_odom_topic').value
         towfish_topic = self.get_parameter('towfish_odom_topic').value
@@ -45,6 +47,8 @@ class LivePlotter(Node):
         # MRAC parameters for tracking point calculation
         self.L = self.get_parameter('tether_length').value
         self.epsilon = self.get_parameter('epsilon').value
+        self.save_on_complete = self.get_parameter('save_plot_on_completion').value
+        self.plot_save_path = self.get_parameter('plot_save_path').value
         
         # State
         self.asv_pos = None
@@ -58,6 +62,9 @@ class LivePlotter(Node):
         self.prev_theta = None  # For theta_dot calculation
         self.prev_time = None  # For dt calculation
         self.tracking_point_vel = None  # Computed tracking point velocity
+        self.path_completed = False  # Track if we've reached the end of the path
+        self.last_asv_pos = None  # For detecting path completion
+        self.theta_dot_filtered = 0.0  # Filtered theta_dot to reduce noise
         
         # History
         self.asv_history = deque(maxlen=history_len)
@@ -118,7 +125,8 @@ class LivePlotter(Node):
         self.ax_traj.set_ylabel('North [m]', fontsize=12)
         self.ax_traj.set_title('ASV-Towfish Live Tracking', fontsize=14, fontweight='bold')
         self.ax_traj.grid(True, alpha=0.3)
-        self.ax_traj.set_aspect('equal', 'box')
+        self.ax_traj.set_ylim(-6, 6)
+        #self.ax_traj.set_aspect('equal', 'box')
         self.ax_traj.legend(loc='upper right', fontsize=9)
         
         # === VELOCITY PLOTS ===
@@ -130,6 +138,8 @@ class LivePlotter(Node):
             self.ax_vel_y.set_ylabel('Y Velocity [m/s]', fontsize=10)
             self.ax_vel_y.set_title('North Velocity Tracking', fontsize=11, fontweight='bold')
             self.ax_vel_y.grid(True, alpha=0.3)
+            self.ax_vel_y.set_ylim(-.6, .6)  # Initialize limits
+            self.ax_vel_y.yaxis.set_major_locator(plt.MultipleLocator(0.2))  # 0.2 spacing
             self.ax_vel_y.legend(loc='upper right', fontsize=8)
             
             # X-velocity plot (East - right column)
@@ -139,6 +149,8 @@ class LivePlotter(Node):
             self.ax_vel_x.set_ylabel('X Velocity [m/s]', fontsize=10)
             self.ax_vel_x.set_title('East Velocity Tracking', fontsize=11, fontweight='bold')
             self.ax_vel_x.grid(True, alpha=0.3)
+            self.ax_vel_x.set_ylim(0, 1.2)  # Initialize limits
+            self.ax_vel_x.yaxis.set_major_locator(plt.MultipleLocator(0.2))  # 0.2 spacing
             self.ax_vel_x.legend(loc='upper right', fontsize=8)
         
         plt.tight_layout()
@@ -216,11 +228,18 @@ class LivePlotter(Node):
                 dtheta = theta - self.prev_theta
                 # Wrap angle difference to [-pi, pi]
                 dtheta = (dtheta + np.pi) % (2 * np.pi) - np.pi
-                theta_dot = dtheta / dt
+                theta_dot_raw = dtheta / dt
+                
+                # Apply low-pass filter to reduce noise (exponential moving average)
+                # alpha = 0.1 means 10% new value, 90% old value (strong smoothing)
+                alpha = 0.1
+                self.theta_dot_filtered = alpha * theta_dot_raw + (1 - alpha) * self.theta_dot_filtered
+                theta_dot = self.theta_dot_filtered
             else:
-                theta_dot = 0.0
+                theta_dot = self.theta_dot_filtered
         else:
             theta_dot = 0.0
+            self.theta_dot_filtered = 0.0
             
         # Update previous values
         self.prev_theta = theta
@@ -248,6 +267,38 @@ class LivePlotter(Node):
         if len(data) >= 4:
             pts = [(data[i], data[i+1]) for i in range(0, len(data), 2)]
             self.path_points = np.array(pts, dtype=float)
+            
+    def _check_path_completion(self):
+        """Check if ASV has reached the end of the path"""
+        if self.path_points is None or len(self.path_points) == 0:
+            return False
+            
+        if self.asv_pos is None:
+            return False
+            
+        # Get final waypoint
+        final_waypoint = self.path_points[-1]
+        
+        # Check distance to final waypoint
+        distance = np.linalg.norm(self.asv_pos - final_waypoint)
+        
+        # Consider path complete if within 1.5 meters of final waypoint
+        completion_threshold = 1.5
+        
+        return distance < completion_threshold
+    
+    def _save_plot(self):
+        """Save the current plot to file"""
+        if self.path_completed:
+            return  # Already saved
+            
+        try:
+            self.get_logger().info(f'Saving plot to {self.plot_save_path}')
+            self.fig.savefig(self.plot_save_path, dpi=300, bbox_inches='tight')
+            self.get_logger().info(f'Plot saved successfully!')
+            self.path_completed = True
+        except Exception as e:
+            self.get_logger().error(f'Failed to save plot: {e}')
             
     def update_plot(self):
         """Update the plot with current data"""
@@ -317,7 +368,7 @@ class LivePlotter(Node):
             if all_x and all_y:
                 margin = 2.0  # meters
                 self.ax_traj.set_xlim(min(all_x) - margin, max(all_x) + margin)
-                self.ax_traj.set_ylim(min(all_y) - margin, max(all_y) + margin)
+                #self.ax_traj.set_ylim(min(all_y) - margin, max(all_y) + margin)
             
             # === UPDATE VELOCITY PLOTS ===
             if self.show_vel_plot and len(self.time_history) > 1:
@@ -350,6 +401,11 @@ class LivePlotter(Node):
                     self.tracking_vy_line.set_data(t_rel, tracking_vels[:, 1])
                     self.ax_vel_y.relim()
                     self.ax_vel_y.autoscale_view()
+            
+            # Check for path completion and save plot
+            if self.save_on_complete and not self.path_completed:
+                if self._check_path_completion():
+                    self._save_plot()
             
             self.fig.canvas.draw()
             self.fig.canvas.flush_events()
