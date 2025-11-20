@@ -125,7 +125,7 @@ class LivePlotter(Node):
         self.ax_traj.set_ylabel('North [m]', fontsize=12)
         self.ax_traj.set_title('ASV-Towfish Live Tracking', fontsize=14, fontweight='bold')
         self.ax_traj.grid(True, alpha=0.3)
-        self.ax_traj.set_ylim(-6, 6)
+        self.ax_traj.set_ylim(-50, 50)
         #self.ax_traj.set_aspect('equal', 'box')
         self.ax_traj.legend(loc='upper right', fontsize=9)
         
