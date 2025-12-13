@@ -1,12 +1,16 @@
 # Towing Controller
-
 Modular ROS2 controller for ASV-towfish cable towing system with waypoint-based path following.
+<div align="center">
+  <img src="https://i.imgur.com/aWzGYzJ.png" alt="simulator image" width="66%">
+</div>
 
 ## Architecture
 
 ```
 Waypoints → Path Generator → LOS Guidance → MRAC Controller → Heading Controller → Thrust Allocator
 ```
+
+
 
 ## Features
 
