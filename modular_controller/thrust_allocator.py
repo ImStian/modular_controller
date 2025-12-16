@@ -18,7 +18,7 @@ class ThrustAllocator:
     T_right = F_surge/2 + tau_r/B
     """
     
-    def __init__(self, thruster_separation: float = 0.5, max_thrust: float = 50.0):
+    def __init__(self, thruster_separation: float = 0.50, max_thrust: float = 50.0):
         """
         Initialize thrust allocator.
         

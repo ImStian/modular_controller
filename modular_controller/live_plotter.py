@@ -24,8 +24,12 @@ class LivePlotter(Node):
         self.declare_parameter('towfish_odom_topic', '/model/bluerov2_heavy/odometry')
         self.declare_parameter('waypoints_topic', '/waypoints')
         self.declare_parameter('v_ref_topic', '/modular_controller/v_ref')  # New
-        self.declare_parameter('history_length', 5000)
-        self.declare_parameter('update_rate_hz', 20)
+        # Base history length (will be auto-expanded if needed)
+        self.declare_parameter('history_length', 10000000)
+        # Target seconds of trail retention; we will measure odom callback rate and
+        # resize history deques to cover at least this duration.
+        self.declare_parameter('desired_history_seconds', 360000)  # 1 hour default
+        self.declare_parameter('update_rate_hz', 2)
         self.declare_parameter('show_tether', True)
         self.declare_parameter('show_boat_shape', True)
         self.declare_parameter('show_velocity_plot', True)  # New
@@ -39,6 +43,7 @@ class LivePlotter(Node):
         waypoints_topic = self.get_parameter('waypoints_topic').value
         v_ref_topic = self.get_parameter('v_ref_topic').value
         history_len = self.get_parameter('history_length').value
+        self.desired_history_seconds = self.get_parameter('desired_history_seconds').value
         update_rate = self.get_parameter('update_rate_hz').value
         self.show_tether = self.get_parameter('show_tether').value
         self.show_boat = self.get_parameter('show_boat_shape').value
@@ -65,6 +70,15 @@ class LivePlotter(Node):
         self.path_completed = False  # Track if we've reached the end of the path
         self.last_asv_pos = None  # For detecting path completion
         self.theta_dot_filtered = 0.0  # Filtered theta_dot to reduce noise
+        self.path_length = 0.0  # Total path length
+        self.distance_traveled = 0.0  # Distance traveled along path
+        self.is_closed_loop = False  # Is this a closed loop path?
+        
+        # Track overall bounds for trajectory plot (not affected by deque limit)
+        self.overall_x_min = float('inf')
+        self.overall_x_max = float('-inf')
+        self.overall_y_min = float('inf')
+        self.overall_y_max = float('-inf')
         
         # History
         self.asv_history = deque(maxlen=history_len)
@@ -72,6 +86,12 @@ class LivePlotter(Node):
         self.time_history = deque(maxlen=history_len)  # New
         self.v_ref_history = deque(maxlen=history_len)  # New
         self.tracking_vel_history = deque(maxlen=history_len)  # Tracking point velocity
+
+        # Callback rate measurement for dynamic history resizing
+        self._asv_callback_times = deque(maxlen=5000)  # store recent timestamps
+        self._rate_estimated = False
+        self._dynamic_resize_done = False
+        self._history_full_warned = False
         
         # Subscribers
         self.create_subscription(Odometry, asv_topic, self.asv_callback, 10)
@@ -125,7 +145,8 @@ class LivePlotter(Node):
         self.ax_traj.set_ylabel('North [m]', fontsize=12)
         self.ax_traj.set_title('ASV-Towfish Live Tracking', fontsize=14, fontweight='bold')
         self.ax_traj.grid(True, alpha=0.3)
-        self.ax_traj.set_ylim(-50, 50)
+        self.ax_traj.set_ylim(-15, 15)
+        self.ax_traj.set_xlim(-5, 75)
         #self.ax_traj.set_aspect('equal', 'box')
         self.ax_traj.legend(loc='upper right', fontsize=9)
         
@@ -138,7 +159,7 @@ class LivePlotter(Node):
             self.ax_vel_y.set_ylabel('Y Velocity [m/s]', fontsize=10)
             self.ax_vel_y.set_title('North Velocity Tracking', fontsize=11, fontweight='bold')
             self.ax_vel_y.grid(True, alpha=0.3)
-            self.ax_vel_y.set_ylim(-.6, .6)  # Initialize limits
+            self.ax_vel_y.set_ylim(-2, 2)  # Initialize limits
             self.ax_vel_y.yaxis.set_major_locator(plt.MultipleLocator(0.2))  # 0.2 spacing
             self.ax_vel_y.legend(loc='upper right', fontsize=8)
             
@@ -149,7 +170,7 @@ class LivePlotter(Node):
             self.ax_vel_x.set_ylabel('X Velocity [m/s]', fontsize=10)
             self.ax_vel_x.set_title('East Velocity Tracking', fontsize=11, fontweight='bold')
             self.ax_vel_x.grid(True, alpha=0.3)
-            self.ax_vel_x.set_ylim(0, 1.2)  # Initialize limits
+            self.ax_vel_x.set_ylim(-2, 2)  # Initialize limits
             self.ax_vel_x.yaxis.set_major_locator(plt.MultipleLocator(0.2))  # 0.2 spacing
             self.ax_vel_x.legend(loc='upper right', fontsize=8)
         
@@ -169,16 +190,70 @@ class LivePlotter(Node):
     def asv_callback(self, msg: Odometry):
         """Process ASV odometry"""
         self.asv_pos = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y])
+
+        # Record callback time for rate estimation
+        now_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self._asv_callback_times.append(now_time)
+        if not self._rate_estimated and len(self._asv_callback_times) > 1000:
+            # Estimate mean dt over collected samples
+            total_dt = self._asv_callback_times[-1] - self._asv_callback_times[0]
+            sample_count = len(self._asv_callback_times) - 1
+            if total_dt > 0 and sample_count > 0:
+                mean_dt = total_dt / sample_count
+                est_rate = 1.0 / mean_dt
+                self._rate_estimated = True
+                self.get_logger().info(f'Estimated ASV odom rate: {est_rate:.1f} Hz')
+                # Compute required length
+                required_len = int(est_rate * self.desired_history_seconds * 1.1)  # 10% margin
+                if required_len > self.asv_history.maxlen:
+                    self.get_logger().info(f'Resizing history deques to {required_len} (covers ~{self.desired_history_seconds}s)')
+                    # Rebuild deques with larger capacity
+                    self.asv_history = deque(self.asv_history, maxlen=required_len)
+                    self.towfish_history = deque(self.towfish_history, maxlen=required_len)
+                    self.time_history = deque(self.time_history, maxlen=required_len)
+                    self.v_ref_history = deque(self.v_ref_history, maxlen=required_len)
+                    self.tracking_vel_history = deque(self.tracking_vel_history, maxlen=required_len)
+                    self._dynamic_resize_done = True
+                else:
+                    self.get_logger().info('Existing history_length sufficient for desired retention.')
+        
+        # Track overall bounds for trajectory plot
+        self.overall_x_min = min(self.overall_x_min, self.asv_pos[0])
+        self.overall_x_max = max(self.overall_x_max, self.asv_pos[0])
+        self.overall_y_min = min(self.overall_y_min, self.asv_pos[1])
+        self.overall_y_max = max(self.overall_y_max, self.asv_pos[1])
+        
+        # Track distance traveled
+        if self.last_asv_pos is not None:
+            self.distance_traveled += np.linalg.norm(self.asv_pos - self.last_asv_pos)
+        self.last_asv_pos = self.asv_pos.copy()
         
         # Extract yaw from quaternion
         qz = msg.pose.pose.orientation.z
         qw = msg.pose.pose.orientation.w
         self.asv_heading = 2.0 * math.atan2(qz, qw)
         
-        # Extract ASV velocity in navigation frame
-        self.asv_vel = np.array([msg.twist.twist.linear.x, msg.twist.twist.linear.y])
+        # Extract ASV velocity in BODY frame and transform to NAVIGATION frame
+        vx_body = msg.twist.twist.linear.x
+        vy_body = msg.twist.twist.linear.y
+        
+        # Rotate from body frame to navigation frame
+        c = np.cos(self.asv_heading)
+        s = np.sin(self.asv_heading)
+        vx_nav = c * vx_body - s * vy_body
+        vy_nav = s * vx_body + c * vy_body
+        
+        self.asv_vel = np.array([vx_nav, vy_nav])  # Now in navigation frame!
         
         self.asv_history.append(self.asv_pos.copy())
+        # Warn once if history gets full and we didn't resize (user can increase param)
+        if not self._history_full_warned and len(self.asv_history) == self.asv_history.maxlen:
+            self._history_full_warned = True
+            duration_covered = len(self.asv_history) / (len(self._asv_callback_times) / (self._asv_callback_times[-1] - self._asv_callback_times[0] + 1e-6)) if len(self._asv_callback_times) > 10 else 0
+            self.get_logger().warn(
+                f'Trail history full at {len(self.asv_history)} points; earlier path will drop. '
+                f'Increase history_length or desired_history_seconds (currently {self.desired_history_seconds}) if full-path retention needed.'
+            )
         
         # Compute tracking point velocity (same method as MRAC)
         self._compute_tracking_point_velocity(msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9)
@@ -186,6 +261,12 @@ class LivePlotter(Node):
     def towfish_callback(self, msg: Odometry):
         """Process towfish odometry"""
         self.towfish_pos = np.array([msg.pose.pose.position.x, msg.pose.pose.position.y])
+        
+        # Track overall bounds for trajectory plot
+        self.overall_x_min = min(self.overall_x_min, self.towfish_pos[0])
+        self.overall_x_max = max(self.overall_x_max, self.towfish_pos[0])
+        self.overall_y_min = min(self.overall_y_min, self.towfish_pos[1])
+        self.overall_y_max = max(self.overall_y_max, self.towfish_pos[1])
         
         # Extract velocity in navigation frame (for reference, not used in tracking)
         vx = msg.twist.twist.linear.x
@@ -268,24 +349,50 @@ class LivePlotter(Node):
             pts = [(data[i], data[i+1]) for i in range(0, len(data), 2)]
             self.path_points = np.array(pts, dtype=float)
             
+            # Update overall bounds with waypoints
+            if len(self.path_points) > 0:
+                self.overall_x_min = min(self.overall_x_min, np.min(self.path_points[:, 0]))
+                self.overall_x_max = max(self.overall_x_max, np.max(self.path_points[:, 0]))
+                self.overall_y_min = min(self.overall_y_min, np.min(self.path_points[:, 1]))
+                self.overall_y_max = max(self.overall_y_max, np.max(self.path_points[:, 1]))
+            
+            # Compute total path length
+            if len(self.path_points) > 1:
+                segments = np.diff(self.path_points, axis=0)
+                segment_lengths = np.linalg.norm(segments, axis=1)
+                self.path_length = np.sum(segment_lengths)
+                
+                # Check if closed loop (start and end are very close)
+                start_end_dist = np.linalg.norm(self.path_points[0] - self.path_points[-1])
+                self.is_closed_loop = start_end_dist < 0.5  # Within 0.5m
+                
+                self.get_logger().info(f'Path length: {self.path_length:.2f}m, Closed loop: {self.is_closed_loop}')
+            
     def _check_path_completion(self):
-        """Check if ASV has reached the end of the path"""
+        """Check if ASV has completed the path"""
         if self.path_points is None or len(self.path_points) == 0:
             return False
             
         if self.asv_pos is None:
             return False
+        
+        # For closed loop paths (like circle), check if traveled full distance
+        if self.is_closed_loop and self.path_length > 0:
+            completion_ratio = self.distance_traveled / self.path_length
+            # Also check if back near starting point
+            start_pos = self.path_points[0]
+            dist_to_start = np.linalg.norm(self.asv_pos - start_pos)
             
-        # Get final waypoint
-        final_waypoint = self.path_points[-1]
+            if completion_ratio >= 0.999 and dist_to_start < 4.0:
+                self.get_logger().info(f'Path complete: traveled {self.distance_traveled:.2f}m / {self.path_length:.2f}m, dist to start: {dist_to_start:.2f}m')
+                return True
         
-        # Check distance to final waypoint
-        distance = np.linalg.norm(self.asv_pos - final_waypoint)
+        # For open paths, check x-position threshold
+        if (not self.is_closed_loop) and (self.asv_pos[0] > 70.0): # Adjust this depending on when you want the plot to be saved
+            self.get_logger().info(f'Path complete: ASV x={self.asv_pos[0]:.2f}m (threshold: 70m)')
+            return True
         
-        # Consider path complete if within 1.5 meters of final waypoint
-        completion_threshold = 1.5
-        
-        return distance < completion_threshold
+        return False
     
     def _save_plot(self):
         """Save the current plot to file"""
@@ -297,6 +404,9 @@ class LivePlotter(Node):
             self.fig.savefig(self.plot_save_path, dpi=300, bbox_inches='tight')
             self.get_logger().info(f'Plot saved successfully!')
             self.path_completed = True
+            # Prevent re-triggering by setting distance_traveled >= path_length
+            if self.path_length > 0:
+                self.distance_traveled = self.path_length
         except Exception as e:
             self.get_logger().error(f'Failed to save plot: {e}')
             
@@ -347,28 +457,13 @@ class LivePlotter(Node):
                     [self.asv_pos[1], self.towfish_pos[1]]
                 )
             
-            # Auto-scale trajectory view
-            all_x = []
-            all_y = []
-            
-            if self.path_points is not None:
-                all_x.extend(self.path_points[:, 0])
-                all_y.extend(self.path_points[:, 1])
-                
-            if len(self.asv_history) > 0:
-                asv_trail = np.array(self.asv_history)
-                all_x.extend(asv_trail[:, 0])
-                all_y.extend(asv_trail[:, 1])
-                
-            if len(self.towfish_history) > 0:
-                towfish_trail = np.array(self.towfish_history)
-                all_x.extend(towfish_trail[:, 0])
-                all_y.extend(towfish_trail[:, 1])
-            
-            if all_x and all_y:
+            # Auto-scale trajectory view using overall bounds (not limited by deque size)
+            if (self.overall_x_min != float('inf') and self.overall_x_max != float('-inf') and
+                self.overall_y_min != float('inf') and self.overall_y_max != float('-inf')):
                 margin = 2.0  # meters
-                self.ax_traj.set_xlim(min(all_x) - margin, max(all_x) + margin)
-                #self.ax_traj.set_ylim(min(all_y) - margin, max(all_y) + margin)
+                self.ax_traj.set_xlim(self.overall_x_min - margin, self.overall_x_max + margin)
+                # Keep y-axis fixed or uncomment to auto-scale:
+                # self.ax_traj.set_ylim(self.overall_y_min - margin, self.overall_y_max + margin)
             
             # === UPDATE VELOCITY PLOTS ===
             if self.show_vel_plot and len(self.time_history) > 1:
@@ -393,14 +488,16 @@ class LivePlotter(Node):
                     # Update X-velocity plot
                     self.v_ref_x_line.set_data(t_rel, v_refs[:, 0])
                     self.tracking_vx_line.set_data(t_rel, tracking_vels[:, 0])
+                    # Only auto-scale x-axis (time), keep y-axis fixed at [-2, 2]
                     self.ax_vel_x.relim()
-                    self.ax_vel_x.autoscale_view()
+                    self.ax_vel_x.autoscale_view(scalex=True, scaley=False)
                     
                     # Update Y-velocity plot
                     self.v_ref_y_line.set_data(t_rel, v_refs[:, 1])
                     self.tracking_vy_line.set_data(t_rel, tracking_vels[:, 1])
+                    # Only auto-scale x-axis (time), keep y-axis fixed at [-2, 2]
                     self.ax_vel_y.relim()
-                    self.ax_vel_y.autoscale_view()
+                    self.ax_vel_y.autoscale_view(scalex=True, scaley=False)
             
             # Check for path completion and save plot
             if self.save_on_complete and not self.path_completed:

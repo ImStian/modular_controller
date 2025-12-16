@@ -22,8 +22,8 @@ class MainController(Node):
         self.declare_parameter('los_delta', 1.0) 
         self.declare_parameter('los_k', 0.3)   
         self.declare_parameter('heading_mode', 'los')  # 'los', 'path', or 'force'
-        self.declare_parameter('k_psi', 40.0)  # Increased from 10.0 to prevent slingshot behavior
-        self.declare_parameter('k_r', 15.0)    # Increased from 5.0 for better damping
+        self.declare_parameter('k_psi', 4.0)  # Increased from 10.0 to prevent slingshot behavior
+        self.declare_parameter('k_r', 0.6)    # Increased from 5.0 for better damping
 
         # Publishers for left and right thrusters (match simulator topic names)
         self.left_pub = self.create_publisher(Float64, '/model/blueboat/joint/motor_port_joint/cmd_thrust', 10)

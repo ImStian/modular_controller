@@ -154,6 +154,20 @@ def plot_heading_controller_modes():
     steps = int(t_sim / dt)
     time = np.linspace(0, t_sim, steps)
     
+    # Create SHARED sinusoidal path for all modes
+    waypoints = []
+    for x in np.linspace(0, 60, 13):
+        y = 10 * np.sin(x / 10.0)
+        waypoints.append([float(x), float(y)])
+    
+    shared_path = WaypointPath(waypoints, method='cubic')
+    
+    # Shared controllers
+    shared_los = LOSGuidance()
+    shared_los.los_parameters(U=2.0, delta=5.0, k=0.15)
+    
+    shared_mrac = MRAC(tether_length=3.5, epsilon=0.7, k_v=1.5, k_a=1.5)
+    
     modes = [HeadingMode.PATH, HeadingMode.LOS, HeadingMode.FORCE]
     mode_names = ['PATH', 'LOS', 'FORCE']
     colors = ['blue', 'green', 'red']
@@ -163,15 +177,20 @@ def plot_heading_controller_modes():
     for mode_idx, (mode, mode_name, color) in enumerate(zip(modes, mode_names, colors)):
         controller = HeadingController(k_psi=10.0, k_r=5.0, mode=mode)
         
-        # Initialize vessel state
-        psi = 0.5  # Initial heading error
+        # Reset MRAC for each mode
+        shared_mrac.reset()
+        
+        # Initialize vessel state - SAME for all modes
+        psi = 0.5  # Same initial heading error
         r = 0.0    # Initial yaw rate
         
-        # Simple circular path for PATH mode
-        def circular_path(s):
-            radius = 10.0
-            theta = s / radius
-            return jnp.array([radius * jnp.cos(theta), radius * jnp.sin(theta)])
+        # Initialize positions - start at s=1.0 to avoid path gradient issues
+        s = 1.0
+        start_pos = shared_path(s)
+        towfish_pos = np.array([float(start_pos[0]), float(start_pos[1]) - 3.0])  # Same off-path position
+        towfish_vel = np.array([0.0, 0.0])
+        asv_pos = towfish_pos - 3.5 * np.array([np.cos(psi), np.sin(psi)])
+        asv_vel = np.array([0.0, 0.0])
         
         # Storage
         headings = []
@@ -180,43 +199,79 @@ def plot_heading_controller_modes():
         heading_refs = []
         yaw_rate_refs = []
         heading_errors = []
-        
-        s = 0.0
-        s_dot = 1.0
+        v_ref_prev = jnp.array([0.0, 0.0])
         
         for i in range(steps):
-            # Compute reference based on mode
+            # Compute LOS guidance (same for all modes)
+            v_ref, s_dot = shared_los.compute(
+                position=towfish_pos.tolist(),
+                s=s,
+                path_function=shared_path
+            )
+            
+            # Compute v_ref_dot
+            if i > 0:
+                v_ref_dot = (v_ref - v_ref_prev) / dt
+            else:
+                v_ref_dot = jnp.array([0.0, 0.0])
+            v_ref_prev = v_ref
+            
+            # Compute MRAC control force (same for all modes)
+            u_p, zeta_dot = shared_mrac.compute(
+                asv_position=asv_pos.tolist(),
+                asv_velocity=asv_vel.tolist(),
+                towfish_position=towfish_pos.tolist(),
+                v_ref=v_ref,
+                v_ref_dot=v_ref_dot,
+                dt=dt
+            )
+            shared_mrac.zeta += zeta_dot * dt
+            
+            # NOW compute different heading references from SAME inputs
             if mode == HeadingMode.PATH:
                 psi_ref, r_ref = controller.compute_reference_from_path(
-                    s=s, s_dot=s_dot, path_function=circular_path, dt=dt
+                    s=s, s_dot=s_dot, path_function=shared_path, dt=dt
                 )
             elif mode == HeadingMode.LOS:
-                # Simulated velocity reference
-                v_ref = jnp.array([1.0 * jnp.cos(time[i] * 0.3), 
-                                   1.0 * jnp.sin(time[i] * 0.3)])
-                v_ref_dot = jnp.array([-1.0 * 0.3 * jnp.sin(time[i] * 0.3),
-                                       1.0 * 0.3 * jnp.cos(time[i] * 0.3)])
                 psi_ref, r_ref = controller.compute_reference_from_los(v_ref, v_ref_dot)
             else:  # FORCE mode
-                # Simulated force direction
-                angle = time[i] * 0.2
-                u_p = jnp.array([10.0 * jnp.cos(angle), 10.0 * jnp.sin(angle)])
                 psi_ref, r_ref = controller.compute_reference_from_force(u_p)
             
             # Compute control torque
             tau_r = controller.compute(psi, r, psi_ref, r_ref)
             
-            # Simple vessel dynamics: I * r_dot = tau_r
-            I = 5.0  # Moment of inertia
-            r_dot = tau_r / I
+            # Transform MRAC force to body frame using ACTUAL heading
+            u_p_body_x = u_p[0] * np.cos(psi) + u_p[1] * np.sin(psi)
+            u_p_body_y = -u_p[0] * np.sin(psi) + u_p[1] * np.cos(psi)
+            
+            # ASV dynamics with coupled heading
+            m_asv = 50.0
+            I = 8.0
+            d_surge = 10.0
+            
+            # Yaw dynamics
+            r_dot = (tau_r - 2.0 * r) / I
             r += r_dot * dt
             psi += r * dt
-            
-            # Wrap heading
             psi = (psi + np.pi) % (2 * np.pi) - np.pi
+            
+            # Surge velocity in body frame (simplified, affected by heading alignment)
+            u_body = 2.0  # Target surge speed
+            
+            # Transform to navigation frame
+            asv_vel = u_body * np.array([np.cos(psi), np.sin(psi)])
+            asv_pos += asv_vel * dt
+            
+            # Towfish dynamics
+            m_towfish = 25.0
+            drag = 5.0
+            towfish_acc = (np.array(u_p) - drag * towfish_vel) / m_towfish
+            towfish_vel += towfish_acc * dt
+            towfish_pos += towfish_vel * dt
             
             # Update path parameter
             s += s_dot * dt
+            s = min(s, shared_path.get_path_length())
             
             # Store
             headings.append(psi)
