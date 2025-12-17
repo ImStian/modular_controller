@@ -24,7 +24,7 @@ Waypoints → Path Generator → LOS Guidance → MRAC Controller → Heading Co
 The following videos demonstrates the project.
 - [Circular Path](https://youtu.be/QxJPO1_ELqk)  
 - [Sinusoidal Path](https://youtu.be/Vrb_MBh5GBo)
-- [Straight Path](https://youtu.be/rfahEI5SZJs)
+- [Straight Path](https://youtu.be/-hITn_GM4L0)
 
 ## Installation Prerequisites
 The control system is made for use with [Marine Robotics Simulation Framework by Markus Buchholz](https://github.com/markusbuchholz/marine-robotics-sim-framework). It is assumed you have already installed and built this for the installation of the Towing Controller. The installation guide for this codebase will start at the "Run Docker"-step from Marine Robotics Simulation Framework as some alterations are required.
@@ -136,4 +136,4 @@ This parameter must be adjusted in `controller_node.py`:
 
 
 ## Licence:
-Please source me if you decide to build ontop of this project. :)
+Please feel free cite me if you decide to build ontop of this project. :)
